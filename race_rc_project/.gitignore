@@ -1,0 +1,11 @@
+# Ignore all data artifacts by default
+data/**
+
+# Keep the folder structure tracked
+!data/
+!data/raw/
+!data/processed/
+
+# Allow small placeholders if needed
+!data/raw/.gitkeep
+!data/processed/.gitkeep

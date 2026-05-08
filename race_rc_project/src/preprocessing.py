@@ -85,22 +85,34 @@ def build_verification_dataset(df: pd.DataFrame) -> pd.DataFrame:
     For each row, creates 4 rows:
     - (article, question, option=A/B/C/D, is_correct=0/1)
     """
-    validated = validate_dataframe(df)
+    validated = validate_dataframe(df).reset_index(drop=True)
     records = []
 
-    for row in validated.itertuples(index=False):
+    for original_idx, row in validated.iterrows():
+        sample_id = f"{row['id']}__{original_idx}"
+        article = str(row["article"])
+        question = str(row["question"])
+        correct = str(row["answer"]).strip().upper()
+
         for option_label in ("A", "B", "C", "D"):
-            option_text = getattr(row, option_label)
+            option_text = str(row[option_label])
+            combined_text = f"{article} [QUESTION] {question} [OPTION] {option_text}"
+            label = 1 if option_label == correct else 0
+
             records.append(
                 {
-                    "id": row.id,
-                    "article": row.article,
-                    "question": row.question,
+                    "sample_id": sample_id,
+                    "id": row["id"],
+                    "article": article,
+                    "question": question,
                     "option_label": option_label,
                     "option_text": option_text,
-                    "answer": row.answer,
-                    "is_correct": 1 if row.answer == option_label else 0,
-                    "model_input": f"{row.article} [SEP] {row.question} [SEP] {option_text}",
+                    "answer": correct,
+                    "text": combined_text,
+                    "label": label,
+                    # Backward-compatible columns used elsewhere in current project.
+                    "is_correct": label,
+                    "model_input": f"{article} [SEP] {question} [SEP] {option_text}",
                 }
             )
 

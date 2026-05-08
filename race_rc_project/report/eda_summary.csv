@@ -1,0 +1,2 @@
+train_rows,val_rows,test_rows,total_rows,missing_id,missing_article,missing_question,missing_A,missing_B,missing_C,missing_D,missing_answer,answer_count_A,answer_count_B,answer_count_C,answer_count_D,avg_article_length,avg_question_length,avg_option_length,longest_article_length,shortest_article_length,longest_article_id,shortest_article_id
+70331,8784,8736,87851,0,0,0,0,0,0,0,0,19141,22722,23887,22101,1560.0507563943495,52.627448748449076,31.946787742882837,6437,9,high19606.txt,middle8028.txt

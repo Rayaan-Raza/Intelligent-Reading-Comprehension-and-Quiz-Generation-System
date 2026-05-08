@@ -1,5 +1,13 @@
 pandas
 numpy
 scikit-learn
-torch
+scipy
+joblib
+matplotlib
+plotly
 streamlit
+nltk
+tqdm
+torch
+sentence-transformers
+xgboost

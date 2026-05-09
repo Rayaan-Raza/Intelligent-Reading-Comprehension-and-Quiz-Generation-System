@@ -13,6 +13,7 @@ from src.model_a_question_generation import (
 from src.question_ranking import (
     generate_and_rank_questions,
     predict_mcq_answer,
+    rank_candidates_with_model,
     rank_candidates_with_sklearn,
 )
 
@@ -28,6 +29,7 @@ __all__ = [
     "generate_question",
     "generate_from_race_sample",
     "generate_from_custom_passage",
+    "rank_candidates_with_model",
     "rank_candidates_with_sklearn",
     "generate_and_rank_questions",
     "predict_mcq_answer",

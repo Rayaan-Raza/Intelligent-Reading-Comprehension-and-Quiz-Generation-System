@@ -1,15 +1,24 @@
-"""Rank generated question candidates with trained sklearn verification models (SVM / RF / LogReg)."""
+"""Rank generated question candidates with trained verifier models (sklearn + MLP)."""
 
 from __future__ import annotations
 
 import pickle
 import sys
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Tuple
 
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.exceptions import InconsistentVersionWarning
+
+try:
+    import torch
+    from torch import nn
+except Exception:  # pragma: no cover - fallback for envs without torch
+    torch = None
+    nn = Any  # type: ignore[assignment]
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -18,19 +27,25 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.features import transform_verification_dataframe
 from src.model_a_question_generation import GeneratedQuestion
 
-RankerName = Literal["random_forest", "linear_svm", "logistic_regression"]
+warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
+
+RankerName = Literal["random_forest", "linear_svm", "logistic_regression", "mlp_neural", "ensemble"]
 VerifierModelName = Literal[
     "random_forest",
     "linear_svm",
     "logistic_regression",
     "xgboost",
     "naive_bayes",
+    "mlp_neural",
+    "ensemble",
 ]
 
 _RANKER_FILES: dict[RankerName, str] = {
     "random_forest": "random_forest_model.pkl",
     "linear_svm": "svm_model.pkl",
     "logistic_regression": "logreg_model.pkl",
+    "mlp_neural": "",
+    "ensemble": "",
 }
 _VERIFIER_FILES: dict[VerifierModelName, str] = {
     "random_forest": "random_forest_model.pkl",
@@ -38,7 +53,36 @@ _VERIFIER_FILES: dict[VerifierModelName, str] = {
     "logistic_regression": "logreg_model.pkl",
     "xgboost": "xgboost_model.pkl",
     "naive_bayes": "naive_bayes_model.pkl",
+    "mlp_neural": "",
+    "ensemble": "",
 }
+
+_ENSEMBLE_WEIGHTS: Dict[str, float] = {
+    "random_forest": 0.35,
+    "linear_svm": 0.25,
+    "mlp_neural": 0.25,
+    "logistic_regression": 0.15,
+}
+
+
+class MLPBinaryClassifier(nn.Module):
+    """Inference-only copy of the MLP architecture used during training."""
+
+    def __init__(self, input_dim: int, hidden_1: int, hidden_2: int, dropout: float) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_1),
+            nn.ReLU(),
+            nn.LayerNorm(hidden_1),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_1, hidden_2),
+            nn.ReLU(),
+            nn.Dropout(dropout * 0.5),
+            nn.Linear(hidden_2, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x).squeeze(1)
 
 
 def _load_training_vectorizer(project_root: Path) -> Any:
@@ -62,6 +106,24 @@ def _load_sklearn_classifier(ranker: RankerName, project_root: Path) -> Any:
     if isinstance(obj, dict) and "model" in obj:
         return obj["model"]
     return obj
+
+
+def _load_neural_model(project_root: Path) -> MLPBinaryClassifier:
+    if torch is None:
+        raise RuntimeError("PyTorch is not available. Install torch to use mlp_neural mode.")
+    model_path = project_root / "models" / "model_a" / "neural" / "mlp_model.pt"
+    if not model_path.exists():
+        raise FileNotFoundError(f"Missing {model_path}. Run: python src/train_neural_model.py")
+    ckpt = torch.load(model_path, map_location="cpu")
+    model = MLPBinaryClassifier(
+        input_dim=int(ckpt["input_dim"]),
+        hidden_1=int(ckpt["hidden_1"]),
+        hidden_2=int(ckpt["hidden_2"]),
+        dropout=float(ckpt.get("dropout", 0.35)),
+    )
+    model.load_state_dict(ckpt["state_dict"])
+    model.eval()
+    return model
 
 
 def _verification_rows_for_candidates(
@@ -102,7 +164,40 @@ def classifier_scores(model: Any, X: Any) -> np.ndarray:
     return model.decision_function(X).astype(np.float64)
 
 
-def rank_candidates_with_sklearn(
+def neural_scores(model: MLPBinaryClassifier, X: Any, batch_size: int = 1024) -> np.ndarray:
+    if torch is None:
+        raise RuntimeError("PyTorch is not available. Install torch to use mlp_neural mode.")
+    n = X.shape[0]
+    out = np.zeros(n, dtype=np.float64)
+    with torch.no_grad():
+        for start in range(0, n, batch_size):
+            end = min(start + batch_size, n)
+            dense = X[start:end].toarray().astype(np.float32)
+            batch = torch.from_numpy(dense)
+            logits = model(batch)
+            probs = torch.sigmoid(logits).cpu().numpy().astype(np.float64)
+            out[start:end] = probs
+    return out
+
+
+def _ensemble_scores(X: Any, project_root: Path) -> np.ndarray:
+    parts: List[np.ndarray] = []
+    total_w = 0.0
+    for model_name, weight in _ENSEMBLE_WEIGHTS.items():
+        if model_name == "mlp_neural":
+            model = _load_neural_model(project_root)
+            scores = neural_scores(model, X)
+        else:
+            model = _load_sklearn_classifier(model_name, project_root)  # type: ignore[arg-type]
+            scores = classifier_scores(model, X)
+        parts.append(scores * weight)
+        total_w += weight
+    if total_w <= 0:
+        raise ValueError("Invalid ensemble configuration with zero total weight.")
+    return np.sum(parts, axis=0) / total_w
+
+
+def rank_candidates_with_model(
     passage: str,
     candidates: List[GeneratedQuestion],
     *,
@@ -111,7 +206,7 @@ def rank_candidates_with_sklearn(
 ) -> List[Tuple[GeneratedQuestion, float]]:
     """
     Score each candidate by treating ``(passage, generated_question, answer_span)`` as one
-    verification row — same representation as training — using a **fitted** TF-IDF + classifier.
+    verification row — same representation as training — using a fitted TF-IDF + verifier.
 
     Returns candidates sorted by score **descending**.
     """
@@ -122,14 +217,35 @@ def rank_candidates_with_sklearn(
 
     df = _verification_rows_for_candidates(passage, short_rows)
     vectorizer = _load_training_vectorizer(root)
-    model = _load_sklearn_classifier(ranker, root)
-
     X = transform_verification_dataframe(df, vectorizer, verbose=False)
-    scores = classifier_scores(model, X)
+    if ranker == "mlp_neural":
+        model = _load_neural_model(root)
+        scores = neural_scores(model, X)
+    elif ranker == "ensemble":
+        scores = _ensemble_scores(X, root)
+    else:
+        model = _load_sklearn_classifier(ranker, root)
+        scores = classifier_scores(model, X)
 
     scored = list(zip(short_rows, scores))
     scored.sort(key=lambda t: t[1], reverse=True)
     return scored
+
+
+def rank_candidates_with_sklearn(
+    passage: str,
+    candidates: List[GeneratedQuestion],
+    *,
+    ranker: Literal["random_forest", "linear_svm", "logistic_regression"] = "random_forest",
+    project_root: Path | None = None,
+) -> List[Tuple[GeneratedQuestion, float]]:
+    """Backward-compatible wrapper for sklearn-only ranking."""
+    return rank_candidates_with_model(
+        passage=passage,
+        candidates=candidates,
+        ranker=ranker,
+        project_root=project_root,
+    )
 
 
 def generate_and_rank_questions(
@@ -140,12 +256,12 @@ def generate_and_rank_questions(
     project_root: Path | None = None,
 ) -> List[Tuple[GeneratedQuestion, float]]:
     """
-    Enumerate template candidates with ``enumerate_candidate_questions``, then rank with sklearn.
+    Enumerate template candidates, then rank with selected verifier.
     """
     from src.model_a_question_generation import enumerate_candidate_questions
 
     cands = enumerate_candidate_questions(passage, top_k=top_k_candidates)
-    return rank_candidates_with_sklearn(
+    return rank_candidates_with_model(
         passage, cands, ranker=ranker, project_root=project_root
     )
 
@@ -187,14 +303,19 @@ def predict_mcq_answer(
     df = pd.DataFrame(rows)
 
     vectorizer = _load_training_vectorizer(root)
-    model_path = root / "models" / "model_a" / "traditional" / _VERIFIER_FILES[model_name]
-    if not model_path.exists():
-        raise FileNotFoundError(f"Missing {model_path}. Run: python src/train_model_a.py")
-    model_obj = joblib.load(model_path)
-    model = model_obj["model"] if isinstance(model_obj, dict) and "model" in model_obj else model_obj
-
     X = transform_verification_dataframe(df, vectorizer, verbose=False)
-    raw_scores = classifier_scores(model, X)
+    if model_name == "mlp_neural":
+        model = _load_neural_model(root)
+        raw_scores = neural_scores(model, X)
+    elif model_name == "ensemble":
+        raw_scores = _ensemble_scores(X, root)
+    else:
+        model_path = root / "models" / "model_a" / "traditional" / _VERIFIER_FILES[model_name]
+        if not model_path.exists():
+            raise FileNotFoundError(f"Missing {model_path}. Run: python src/train_model_a.py")
+        model_obj = joblib.load(model_path)
+        model = model_obj["model"] if isinstance(model_obj, dict) and "model" in model_obj else model_obj
+        raw_scores = classifier_scores(model, X)
     score_map = {label: float(raw_scores[idx]) for idx, label in enumerate(required_labels)}
     predicted_label = max(score_map, key=score_map.get)
     return predicted_label, score_map

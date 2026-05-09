@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import random
 import sys
+import warnings
 from pathlib import Path
 
 import pandas as pd
+from sklearn.exceptions import InconsistentVersionWarning
 
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
@@ -30,6 +32,8 @@ ALL_MODELS = [
     "naive_bayes",
     "random_forest",
     "xgboost",
+    "mlp_neural",
+    "ensemble",
 ]
 DEMO_PASSAGES = [
     "the bells rang at 2pm and school was over",
@@ -76,6 +80,7 @@ def _build_mcq_options(correct_answer: str) -> tuple[dict[str, str], str]:
 
 
 def main() -> None:
+    warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
     random.seed(42)
     stats = {
         model: {"correct": 0, "total": 0, "skipped": 0}

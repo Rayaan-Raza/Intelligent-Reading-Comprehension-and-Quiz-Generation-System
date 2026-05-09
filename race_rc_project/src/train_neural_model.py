@@ -22,6 +22,22 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.features import run_feature_pipeline
 
+# Tunable defaults — sparse TF-IDF ~20k dims; val loss often plateaus early without LR decay.
+DEFAULT_HPARAMS = {
+    "batch_size_train": 512,
+    "batch_size_val": 1024,
+    "lr": 3e-4,
+    "weight_decay": 1e-4,
+    "hidden_1": 768,
+    "hidden_2": 256,
+    "dropout": 0.35,
+    "max_epochs": 50,
+    "early_stop_patience": 10,
+    "scheduler_factor": 0.5,
+    "scheduler_patience": 3,
+    "grad_clip_norm": 1.0,
+}
+
 
 def _log(msg: str) -> None:
     print(f"[train_neural_model] {msg}", flush=True)
@@ -92,14 +108,24 @@ class SparseBinaryDataset(Dataset):
 
 
 class MLPBinaryClassifier(nn.Module):
-    def __init__(self, input_dim: int, hidden_1: int = 512, hidden_2: int = 128, dropout: float = 0.3):
+    """MLP with LayerNorm on hidden activations — helps stability on high-dim sparse features."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_1: int = 768,
+        hidden_2: int = 256,
+        dropout: float = 0.35,
+    ):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_1),
             nn.ReLU(),
+            nn.LayerNorm(hidden_1),
             nn.Dropout(dropout),
             nn.Linear(hidden_1, hidden_2),
             nn.ReLU(),
+            nn.Dropout(dropout * 0.5),
             nn.Linear(hidden_2, 1),
         )
 
@@ -121,6 +147,7 @@ def _predict_scores(model: nn.Module, loader: DataLoader, device: torch.device) 
 
 def train() -> None:
     start = time.perf_counter()
+    hp = dict(DEFAULT_HPARAMS)
     _log("starting neural training")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     _log(f"device={device}")
@@ -136,57 +163,115 @@ def train() -> None:
 
     train_ds = SparseBinaryDataset(X_train, y_train)
     val_ds = SparseBinaryDataset(X_val, y_val)
-    train_loader = DataLoader(train_ds, batch_size=256, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_ds, batch_size=512, shuffle=False, num_workers=0)
+    pin_memory = device.type == "cuda"
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=hp["batch_size_train"],
+        shuffle=True,
+        num_workers=0,
+        pin_memory=pin_memory,
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=hp["batch_size_val"],
+        shuffle=False,
+        num_workers=0,
+        pin_memory=pin_memory,
+    )
 
     input_dim = X_train.shape[1]
-    model = MLPBinaryClassifier(input_dim=input_dim).to(device)
-    criterion = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
+    n_pos = float((y_train == 1).sum())
+    n_neg = float(len(y_train) - n_pos)
+    pos_weight = torch.tensor([n_neg / max(n_pos, 1.0)], device=device)
+    _log(f"class balance pos_weight={pos_weight.item():.4f} (neg/pos)")
+
+    model = MLPBinaryClassifier(
+        input_dim=input_dim,
+        hidden_1=hp["hidden_1"],
+        hidden_2=hp["hidden_2"],
+        dropout=hp["dropout"],
+    ).to(device)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    # Same logits; no weighting — comparable scale to ~0.56 logs from unweighted BCE runs.
+    criterion_unweighted = nn.BCEWithLogitsLoss()
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=hp["lr"],
+        weight_decay=hp["weight_decay"],
+    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=hp["scheduler_factor"],
+        patience=hp["scheduler_patience"],
+        min_lr=1e-6,
+    )
 
     best_state = copy.deepcopy(model.state_dict())
     best_val_loss = float("inf")
-    patience = 4
     patience_counter = 0
-    max_epochs = 20
+    max_epochs = hp["max_epochs"]
+    early_stop_patience = hp["early_stop_patience"]
 
+    _log(
+        f"hparams lr={hp['lr']} wd={hp['weight_decay']} hidden=({hp['hidden_1']},{hp['hidden_2']}) "
+        f"dropout={hp['dropout']} batch=({hp['batch_size_train']},{hp['batch_size_val']})"
+    )
     _log(f"input_dim={input_dim}, train_rows={len(train_ds)}, val_rows={len(val_ds)}")
     for epoch in range(1, max_epochs + 1):
         model.train()
         train_loss_sum = 0.0
+        train_loss_u_sum = 0.0
         train_count = 0
 
         for x_batch, y_batch in train_loader:
-            x_batch = x_batch.to(device)
-            y_batch = y_batch.to(device)
+            x_batch = x_batch.to(device, non_blocking=pin_memory)
+            y_batch = y_batch.to(device, non_blocking=pin_memory)
 
             optimizer.zero_grad()
             logits = model(x_batch)
             loss = criterion(logits, y_batch)
+            loss_u = criterion_unweighted(logits, y_batch)
             loss.backward()
+            if hp["grad_clip_norm"] > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), hp["grad_clip_norm"])
             optimizer.step()
 
             batch_size = y_batch.size(0)
             train_loss_sum += float(loss.item()) * batch_size
+            train_loss_u_sum += float(loss_u.item()) * batch_size
             train_count += batch_size
 
         train_loss = train_loss_sum / max(train_count, 1)
+        train_loss_u = train_loss_u_sum / max(train_count, 1)
 
         model.eval()
         val_loss_sum = 0.0
+        val_loss_u_sum = 0.0
         val_count = 0
         with torch.no_grad():
             for x_batch, y_batch in val_loader:
-                x_batch = x_batch.to(device)
-                y_batch = y_batch.to(device)
+                x_batch = x_batch.to(device, non_blocking=pin_memory)
+                y_batch = y_batch.to(device, non_blocking=pin_memory)
                 logits = model(x_batch)
                 loss = criterion(logits, y_batch)
+                loss_u = criterion_unweighted(logits, y_batch)
                 batch_size = y_batch.size(0)
                 val_loss_sum += float(loss.item()) * batch_size
+                val_loss_u_sum += float(loss_u.item()) * batch_size
                 val_count += batch_size
         val_loss = val_loss_sum / max(val_count, 1)
+        val_loss_u = val_loss_u_sum / max(val_count, 1)
 
-        _log(f"epoch={epoch:02d} train_loss={train_loss:.5f} val_loss={val_loss:.5f}")
+        scheduler.step(val_loss)
+        lr_now = optimizer.param_groups[0]["lr"]
+        line = (
+            f"epoch={epoch:02d} train_w={train_loss:.5f} val_w={val_loss:.5f} "
+            f"train_u={train_loss_u:.5f} val_u={val_loss_u:.5f} lr={lr_now:.2e}"
+        )
+        if epoch == 1:
+            line += " | w=pos-weighted BCE (optim), u=unweighted BCE (same scale as older ~0.56 logs)"
+        _log(line)
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -194,7 +279,7 @@ def train() -> None:
             patience_counter = 0
         else:
             patience_counter += 1
-            if patience_counter >= patience:
+            if patience_counter >= early_stop_patience:
                 _log("early stopping triggered")
                 break
 
@@ -218,10 +303,12 @@ def train() -> None:
         {
             "state_dict": model.state_dict(),
             "input_dim": input_dim,
-            "hidden_1": 512,
-            "hidden_2": 128,
-            "dropout": 0.3,
+            "hidden_1": hp["hidden_1"],
+            "hidden_2": hp["hidden_2"],
+            "dropout": hp["dropout"],
+            "hparams": hp,
             "best_val_loss": best_val_loss,
+            "pos_weight": float(pos_weight.item()),
         },
         model_path,
     )

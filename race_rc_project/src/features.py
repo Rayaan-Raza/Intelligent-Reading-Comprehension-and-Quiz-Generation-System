@@ -7,7 +7,7 @@ import pickle
 import re
 import sys
 import time
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -226,21 +226,47 @@ def _get_vectorizer() -> TfidfVectorizer:
     )
 
 
-def build_feature_matrices(
-    train_df: pd.DataFrame, val_df: pd.DataFrame, verbose: bool = False
-) -> Tuple[csr_matrix, csr_matrix, np.ndarray, np.ndarray, TfidfVectorizer]:
+def transform_verification_dataframe(
+    df: pd.DataFrame,
+    vectorizer: TfidfVectorizer,
+    verbose: bool = False,
+) -> csr_matrix:
     """
-    Build leakage-safe train/val feature matrices.
+    Apply a **fitted** TF-IDF vectorizer + numeric features to a verification-shaped DataFrame.
 
-    - fits TF-IDF on train only
-    - transforms val with same vectorizer
+    Use for test-time inference, held-out test rows, or ranking — **do not** refit the vectorizer.
+    """
+    base = _build_base_feature_frame(df)
+    if "is_correct" not in base.columns:
+        base["is_correct"] = df["is_correct"].values if "is_correct" in df.columns else 1
+    X_tfidf = vectorizer.transform(base["combined_text"])
+    numeric = csr_matrix(_compute_numeric_features(base, vectorizer, verbose=verbose).values)
+    return hstack([X_tfidf, numeric], format="csr")
+
+
+def build_feature_matrices(
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    test_df: pd.DataFrame | None = None,
+    verbose: bool = False,
+) -> Tuple[csr_matrix, csr_matrix, np.ndarray, np.ndarray, TfidfVectorizer, Optional[csr_matrix], Optional[np.ndarray]]:
+    """
+    Build leakage-safe train/val (+ optional test) feature matrices.
+
+    - fits TF-IDF on **train only**
+    - transforms val / test with the **same** fitted vectorizer
     - combines TF-IDF + numeric features with sparse hstack
+
+    Test matrices are ``None`` when ``test_df`` is omitted or empty.
     """
     start = time.perf_counter()
     train_base = _build_base_feature_frame(train_df)
     val_base = _build_base_feature_frame(val_df)
+    test_nonempty = test_df is not None and len(test_df) > 0
+    test_base = _build_base_feature_frame(test_df) if test_nonempty else None
     _log(
-        f"prepared base frames: train={len(train_base)} rows, val={len(val_base)} rows",
+        f"prepared base frames: train={len(train_base)} rows, val={len(val_base)} rows"
+        + (f", test={len(test_base)}" if test_base is not None else ""),
         verbose=verbose,
     )
 
@@ -259,14 +285,26 @@ def build_feature_matrices(
 
     y_train = train_base["is_correct"].astype(int).to_numpy()
     y_val = val_base["is_correct"].astype(int).to_numpy()
-    elapsed = time.perf_counter() - start
-    _log(
-        f"feature matrices built in {elapsed:.1f}s | "
-        f"X_train={X_train.shape}, X_val={X_val.shape}",
-        verbose=verbose,
-    )
 
-    return X_train, X_val, y_train, y_val, vectorizer
+    X_test: Optional[csr_matrix] = None
+    y_test: Optional[np.ndarray] = None
+    if test_base is not None:
+        _log("transforming test combined text with fitted TF-IDF", verbose=verbose)
+        X_test_tfidf = vectorizer.transform(test_base["combined_text"])
+        test_numeric = csr_matrix(_compute_numeric_features(test_base, vectorizer, verbose=verbose).values)
+        X_test = hstack([X_test_tfidf, test_numeric], format="csr")
+        y_test = test_base["is_correct"].astype(int).to_numpy()
+
+    elapsed = time.perf_counter() - start
+    msg = (
+        f"feature matrices built in {elapsed:.1f}s | "
+        f"X_train={X_train.shape}, X_val={X_val.shape}"
+    )
+    if X_test is not None:
+        msg += f", X_test={X_test.shape}"
+    _log(msg, verbose=verbose)
+
+    return X_train, X_val, y_train, y_val, vectorizer, X_test, y_test
 
 
 def save_feature_artifacts(
@@ -276,8 +314,10 @@ def save_feature_artifacts(
     y_val: np.ndarray,
     vectorizer: TfidfVectorizer,
     project_root: Path | str = Path("."),
+    X_test: csr_matrix | None = None,
+    y_test: np.ndarray | None = None,
 ) -> None:
-    """Save vectorizer and train/val features to required paths."""
+    """Save vectorizer and train/val (+ optional test) features to required paths."""
     root = Path(project_root)
     vectorizer_path = root / "models" / "model_a" / "traditional" / "tfidf_vectorizer.pkl"
     processed_dir = root / "data" / "processed"
@@ -294,26 +334,51 @@ def save_feature_artifacts(
     save_npz(processed_dir / "X_val_features.npz", X_val)
     np.save(processed_dir / "y_train.npy", y_train)
     np.save(processed_dir / "y_val.npy", y_val)
+    if X_test is not None and y_test is not None:
+        save_npz(processed_dir / "X_test_features.npz", X_test)
+        np.save(processed_dir / "y_test.npy", y_test)
 
 
 def run_feature_pipeline(
     train_csv: Path | str = Path("data/processed/train_verification.csv"),
     val_csv: Path | str = Path("data/processed/val_verification.csv"),
+    test_csv: Path | str | None = Path("data/processed/test_verification.csv"),
     project_root: Path | str = Path("."),
     verbose: bool = True,
 ) -> None:
-    """Load processed splits, build features, and persist artifacts."""
+    """Load processed splits, build features, and persist artifacts (including test when CSV exists)."""
     start = time.perf_counter()
+    root = Path(project_root)
     _log(f"loading train data from {train_csv}", verbose=verbose)
     train_df = pd.read_csv(train_csv)
     _log(f"loading val data from {val_csv}", verbose=verbose)
     val_df = pd.read_csv(val_csv)
 
-    X_train, X_val, y_train, y_val, vectorizer = build_feature_matrices(
-        train_df, val_df, verbose=verbose
+    test_df: pd.DataFrame | None = None
+    test_path = Path(test_csv) if test_csv is not None else None
+    if test_path is not None and test_path.exists():
+        _log(f"loading test data from {test_path}", verbose=verbose)
+        test_df = pd.read_csv(test_path)
+    else:
+        _log(
+            "test_verification.csv not found — skipping test features (optional)",
+            verbose=verbose,
+        )
+
+    X_train, X_val, y_train, y_val, vectorizer, X_test, y_test = build_feature_matrices(
+        train_df, val_df, test_df=test_df, verbose=verbose
     )
     _log("saving vectorizer and feature artifacts", verbose=verbose)
-    save_feature_artifacts(X_train, X_val, y_train, y_val, vectorizer, project_root=project_root)
+    save_feature_artifacts(
+        X_train,
+        X_val,
+        y_train,
+        y_val,
+        vectorizer,
+        project_root=project_root,
+        X_test=X_test,
+        y_test=y_test,
+    )
 
     print("Saved feature artifacts:")
     print("models/model_a/traditional/tfidf_vectorizer.pkl")
@@ -321,9 +386,14 @@ def run_feature_pipeline(
     print("data/processed/X_val_features.npz")
     print("data/processed/y_train.npy")
     print("data/processed/y_val.npy")
+    if X_test is not None and y_test is not None:
+        print("data/processed/X_test_features.npz")
+        print("data/processed/y_test.npy")
     print(f"X_train shape: {X_train.shape}, X_val shape: {X_val.shape}")
     print(f"y_train positives: {int(y_train.sum())} / {len(y_train)}")
     print(f"y_val positives: {int(y_val.sum())} / {len(y_val)}")
+    if X_test is not None:
+        print(f"X_test shape: {X_test.shape}, y_test positives: {int(y_test.sum())} / {len(y_test)}")
     _log(f"pipeline completed in {time.perf_counter() - start:.1f}s", verbose=verbose)
 
 

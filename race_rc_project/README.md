@@ -41,8 +41,10 @@ race_rc_project/
 │  ├─ train_neural_model.py     # Phase 6: MLP on same features
 │  ├─ train_unsupervised.py     # Phase 7: K-Means + silhouette + purity
 │  ├─ model_a_question_generation.py   # Phase 8: RACE vs custom question modes
-│  ├─ question_ranking.py       # Rank candidates with SVM / RF / LogReg + TF-IDF
+│  ├─ question_ranking.py       # Rank/check with sklearn, MLP, or ensemble
 │  ├─ evaluate_test.py          # Held-out test metrics for saved sklearn models
+│  ├─ evaluate_neural_test.py   # Held-out test metrics for saved MLP model
+│  ├─ build_model_a_comparison.py # One table: traditional + neural test comparison
 │  ├─ inference.py              # predict + question generation + ranking exports
 │  ├─ train_model_b.py          # placeholder (Model B)
 │  ├─ evaluate.py               # small helpers
@@ -154,25 +156,31 @@ Two modes:
 **Additional:**
 
 - **`enumerate_candidate_questions(passage, top_k)`** — multiple template questions from different sentences (TF-IDF ranked).
-- **`src/question_ranking.py`** — ranks candidates by treating each `(passage, generated_question, answer_span)` as one **verification row**, using the **same** fitted TF-IDF (`tfidf_vectorizer.pkl`) plus a trained classifier (**Random Forest**, **Linear SVM**, or **Logistic Regression** from Phase 5). Functions: `rank_candidates_with_sklearn`, `generate_and_rank_questions`.
+- **`src/question_ranking.py`** — ranks candidates and scores A/B/C/D options by treating each row as a verification sample using the same fitted TF-IDF (`tfidf_vectorizer.pkl`) plus a trained verifier. Supported modes: **Random Forest**, **Linear SVM**, **Logistic Regression**, **MLP Neural**, and **ensemble**.
 
 **Exports:** `inference.py` re-exports generation + ranking helpers and keeps `run_inference(model, x)`.
 
 **Manual test script:** `scripts/test_module8_question_generation.py` (demos Mode 1, Mode 2, unified API; optional passage via CLI args).
 
-### 3.10 Held-out test evaluation (`src/evaluate_test.py`)
+### 3.10 Held-out test evaluation (`src/evaluate_test.py`, `src/evaluate_neural_test.py`)
 
 After generating **`X_test_features.npz`** / **`y_test.npy`** with `features.py`, run:
 
 ```powershell
 python src/evaluate_test.py
+python src/evaluate_neural_test.py
+python src/build_model_a_comparison.py
 ```
 
-Writes **`reports/test_evaluation.csv`**: binary metrics + **MCQ exact match** on **test** for each saved sklearn model (skips missing pickle files gracefully).
+Writes:
+- **`reports/test_evaluation.csv`** for sklearn models
+- **`reports/test_evaluation_neural.csv`** for MLP neural model
+- **`reports/model_a_comparison_table.csv`** for one combined Model A comparison table
 
 ### 3.11 Notebooks, UI, Model B
 
-- **Notebooks** (`notebooks/`) and **UI** (`ui/app.py`) may still be placeholders or experiments; core training paths are the `src/train_*.py` scripts above.
+- **Notebooks** (`notebooks/`) may still be experiments; core training paths are the `src/train_*.py` scripts above.
+- **UI (`ui/app.py`)** now includes a quiz checker with verifier selection: Logistic Regression / Linear SVM / Random Forest / MLP Neural Network / Ensemble.
 - **`train_model_b.py`** remains a placeholder unless you extend it.
 
 ### 3.12 `.gitignore`
@@ -295,16 +303,20 @@ Requires `data/processed/X_test_features.npz`, `y_test.npy`, and `test_verificat
 
 ```powershell
 python src/evaluate_test.py
+python src/evaluate_neural_test.py
+python src/build_model_a_comparison.py
 ```
 
-Writes `reports/test_evaluation.csv`.
+Writes `reports/test_evaluation.csv`, `reports/test_evaluation_neural.csv`, and `reports/model_a_comparison_table.csv`.
 
-### I) Rank generated question candidates (SVM / RF / LogReg)
+### I) Rank generated question candidates (SVM / RF / LogReg / MLP / Ensemble)
 
 Requires Phase 5 pickles + `tfidf_vectorizer.pkl`. Example from Python:
 
 ```powershell
 python -c "from src.question_ranking import generate_and_rank_questions; print(generate_and_rank_questions('Paris is the capital of France. The Louvre is a famous museum.', ranker='random_forest')[:2])"
+python -c "from src.question_ranking import generate_and_rank_questions; print(generate_and_rank_questions('Paris is the capital of France. The Louvre is a famous museum.', ranker='mlp_neural')[:2])"
+python -c "from src.question_ranking import generate_and_rank_questions; print(generate_and_rank_questions('Paris is the capital of France. The Louvre is a famous museum.', ranker='ensemble')[:2])"
 ```
 
 ---
@@ -320,7 +332,7 @@ python src/train_neural_model.py
 python src/train_unsupervised.py
 ```
 
-Run Phase 8 tests separately (`scripts/test_module8_question_generation.py`). After models are trained, run **`python src/evaluate_test.py`** if test features exist.
+Run Phase 8 tests separately (`scripts/test_module8_question_generation.py`). After models are trained, run **`python src/evaluate_test.py`**, **`python src/evaluate_neural_test.py`**, and optionally **`python src/build_model_a_comparison.py`**.
 
 ---
 
@@ -350,7 +362,7 @@ python -c "from scipy.sparse import load_npz; import numpy as np; Xt=load_npz('d
 
 ## 9) Known limitations / notes
 
-- **Neural test evaluation:** `evaluate_test.py` covers **saved sklearn** models only. Add a small script to load `mlp_model.pt` and score `X_test` if you need MLP on test.
+- **Model artifact compatibility:** if old sklearn pickles were serialized under a different sklearn version, some loaders may warn or skip. Re-train in current env for clean runs.
 - **Pickle compatibility:** Reinstall / match **scikit-learn** version if loading older `*.pkl` models raises errors (see sklearn persistence docs).
 - **Git:** large binaries and reports are often gitignored; reproduce artifacts via the commands in §6.
 
@@ -358,8 +370,8 @@ python -c "from scipy.sparse import load_npz; import numpy as np; Xt=load_npz('d
 
 ## 10) Suggested extensions
 
-1. **Streamlit (or similar) UI:** passage → `generate_and_rank_questions` → show MCQ options scored by a chosen Phase 5 model.
-2. **Neural test script:** mirror `evaluate_test.py` for `mlp_model.pt` + `X_test_features.npz`.
+1. **Improve UI experience:** add richer visual comparison between single-model and ensemble scoring.
+2. **Neural calibration:** tune thresholding and calibration for MLP probability outputs.
 3. **Model B** implementation in `train_model_b.py` if required by the brief.
 
 ---

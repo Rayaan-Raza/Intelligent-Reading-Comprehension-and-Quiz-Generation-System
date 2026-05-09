@@ -29,6 +29,7 @@ env/
 models/**/*
 reports/**/*
 figures/**/*
+*.pkl
 
 # Keep directory structure if needed
 !models/

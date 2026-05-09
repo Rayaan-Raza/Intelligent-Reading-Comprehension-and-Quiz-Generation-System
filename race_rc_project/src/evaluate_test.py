@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import time
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -11,11 +12,14 @@ import joblib
 import numpy as np
 import pandas as pd
 from scipy.sparse import load_npz
+from sklearn.exceptions import InconsistentVersionWarning
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
+
+warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
 
 
 def _log(msg: str) -> None:
@@ -118,8 +122,15 @@ def evaluate() -> None:
     report_dir = PROJECT_ROOT / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
     out_csv = report_dir / "test_evaluation.csv"
-    pd.DataFrame(rows).to_csv(out_csv, index=False)
+    out_df = pd.DataFrame(rows)
+    out_df.to_csv(out_csv, index=False)
     _log(f"saved {out_csv}")
+    _log("model comparison (test):")
+    print(
+        out_df[
+            ["model", "binary_accuracy", "binary_macro_f1", "binary_precision", "binary_recall", "mcq_exact_match"]
+        ].to_string(index=False, float_format=lambda x: f"{x:.4f}")
+    )
     _log(f"done in {time.perf_counter() - start:.2f}s")
 
 

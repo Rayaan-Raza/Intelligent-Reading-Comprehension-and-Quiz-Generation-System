@@ -157,11 +157,11 @@ def _verification_rows_for_candidates(
 def classifier_scores(model: Any, X: Any) -> np.ndarray:
     """Higher = more plausible as 'correct option' under the verification model."""
     if hasattr(model, "predict_proba"):
-        try:
-            return model.predict_proba(X)[:, 1].astype(np.float64)
-        except Exception:
-            pass
-    return model.decision_function(X).astype(np.float64)
+        return model.predict_proba(X)[:, 1].astype(np.float64)
+    elif hasattr(model, "decision_function"):
+        return model.decision_function(X).astype(np.float64)
+    else:
+        return model.predict(X).astype(np.float64)
 
 
 def neural_scores(model: MLPBinaryClassifier, X: Any, batch_size: int = 1024) -> np.ndarray:

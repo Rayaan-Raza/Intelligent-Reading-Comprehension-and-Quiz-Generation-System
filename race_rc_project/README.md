@@ -1,350 +1,367 @@
 # RACE Reading Comprehension Project
 
-Detailed documentation of the work completed so far, the current project state, and exact commands to run each stage.
+End-to-end documentation: goals, implemented phases (data → features → supervised traditional ML → neural MLP → unsupervised clustering → question generation), artifacts, and exact commands.
 
 ---
 
-## 1) Project Goal
+## 1) Project goal
 
-This project builds a reading-comprehension pipeline (RACE-style multiple-choice QA) with:
+Build a **RACE-style** reading comprehension pipeline where each multiple-choice item is turned into **four binary verification rows** (one per option A–D). Models predict whether each option is **correct (1)** or **wrong (0)**. Evaluation includes:
 
-- dataset loading and validation,
-- leakage-safe splitting by passage id,
-- preprocessing into a binary verification format,
-- feature engineering using TF-IDF + handcrafted numeric/sentence features,
-- placeholder model training/evaluation/inference scripts ready for expansion,
-- notebooks and report artifacts for EDA and experiments.
+- **Binary metrics** on all option rows: accuracy, macro F1, precision, recall, confusion matrix.
+- **MCQ exact match**: among the four scored options for one question, pick the highest-scoring label and compare to the gold **A/B/C/D**.
 
-The core modeling idea currently implemented is to convert each MCQ item into **4 binary rows** (one per option A/B/C/D), then train a classifier to predict `is_correct` for each option.
+The feature stack combines **TF-IDF** on concatenated article + question + option text with **handcrafted numeric features** (similarities, overlaps, sentence-level cues).
 
 ---
 
-## 2) Current Repository Structure
+## 2) Repository structure (current)
 
 ```text
 race_rc_project/
 ├─ data/
-│  ├─ raw/                      # input CSV(s), e.g. val.csv
-│  ├─ splits/                   # leakage-safe split CSVs
-│  └─ processed/                # verification data + feature artifacts
-├─ src/
-│  ├─ data_loader.py
-│  ├─ preprocessing.py
-│  ├─ create_splits.py
-│  ├─ build_processed_data.py
-│  ├─ features.py
-│  ├─ train_model_a.py          # placeholder
-│  ├─ train_model_b.py          # placeholder
-│  ├─ evaluate.py               # placeholder metric helper
-│  ├─ inference.py              # placeholder inference helper
-│  └─ neural_model.py           # placeholder neural class
-├─ notebooks/
-│  ├─ 01_eda.ipynb
-│  └─ 02_experiments.ipynb
-├─ report/
-│  ├─ eda_summary.csv
-│  └─ final_report.pdf
-├─ figures/
-│  ├─ answer_distribution.png
-│  └─ article_length_distribution.png
-├─ ui/
-│  └─ app.py                    # placeholder UI entrypoint
+│  ├─ raw/                      # source CSV (e.g. val.csv)
+│  ├─ splits/                   # leakage-safe train/val/test CSVs
+│  └─ processed/                # verification CSVs + sparse feature matrices
 ├─ models/
-│  └─ model_a/traditional/
-│     └─ tfidf_vectorizer.pkl
+│  └─ model_a/
+│     ├─ traditional/         # TF-IDF vectorizer, sklearn models, K-Means
+│     └─ neural/              # PyTorch MLP checkpoint
+├─ reports/                     # CSV metrics (gitignored if generated)
+├─ figures/                     # confusion matrices, etc. (gitignored if generated)
+├─ scripts/
+│  └─ test_module8_question_generation.py   # manual tests for question generation
+├─ src/
+│  ├─ data_loader.py            # RACE schema load/validate
+│  ├─ preprocessing.py          # clean_text, verification expansion, sample_id
+│  ├─ create_splits.py          # split by passage id
+│  ├─ build_processed_data.py  # writes *\_verification.csv per split
+│  ├─ features.py               # TF-IDF + numeric features, saves .npz/.npy
+│  ├─ train_model_a.py          # Phase 5: traditional ML + metrics + artifacts
+│  ├─ train_neural_model.py     # Phase 6: MLP on same features
+│  ├─ train_unsupervised.py     # Phase 7: K-Means + silhouette + purity
+│  ├─ model_a_question_generation.py   # Phase 8: RACE vs custom question modes
+│  ├─ question_ranking.py       # Rank candidates with SVM / RF / LogReg + TF-IDF
+│  ├─ evaluate_test.py          # Held-out test metrics for saved sklearn models
+│  ├─ inference.py              # predict + question generation + ranking exports
+│  ├─ train_model_b.py          # placeholder (Model B)
+│  ├─ evaluate.py               # small helpers
+│  └─ neural_model.py           # legacy placeholder class (unused by train_neural_model)
+├─ notebooks/
+├─ report/
+├─ ui/
 ├─ requirements.txt
 └─ README.md
 ```
 
 ---
 
-## 3) Work Completed So Far (Detailed)
+## 3) Work completed (detailed)
 
-### 3.1 Data loading and schema validation
+### 3.1 Data loading (`src/data_loader.py`)
 
-Implemented in `src/data_loader.py`:
+- Expected columns: `id`, `article`, `question`, `A`, `B`, `C`, `D`, `answer`.
+- Drops stray `Unnamed:` index columns; validates schema; tolerates empty files.
 
-- defines expected schema:
-  - `id`, `article`, `question`, `A`, `B`, `C`, `D`, `answer`
-- safely loads split CSV files,
-- drops accidental `Unnamed:` index columns,
-- validates required columns,
-- supports empty-file fallback with a correctly shaped empty DataFrame.
+### 3.2 Preprocessing (`src/preprocessing.py`)
 
-Why this matters:
-- prevents silent schema mismatch bugs early,
-- keeps downstream preprocessing/model code stable.
+- **`clean_text`**, **`normalize_answer_label`**, **`split_sentences`**, **`validate_dataframe`**.
+- **`build_verification_dataset()`** expands each MCQ row into **four rows** with:
+  - **`sample_id`**: `{id}__{original_row_index}` so MCQ grouping does not collapse distinct questions that share the same `(id, question)` text.
+  - **`label`** / **`is_correct`**: `1` if option letter equals gold answer, else `0`.
+  - **`text`**: `article [QUESTION] question [OPTION] option_text` (for reference/analysis).
+  - **`model_input`**: backward-compatible `article [SEP] question [SEP] option_text` used by the feature pipeline.
 
-### 3.2 Text preprocessing utilities
+### 3.3 Leakage-safe splits (`src/create_splits.py`)
 
-Implemented in `src/preprocessing.py`:
+- Split by **unique `id`** (~80% / 10% / 10%), assert **no id overlap** across train/val/test.
+- Outputs: `data/splits/train.csv`, `val.csv`, `test.csv`.
 
-- `clean_text()`: lowercase + whitespace normalization,
-- `normalize_answer_label()`: enforces valid labels `A/B/C/D`,
-- `split_sentences()`: regex-based sentence chunking for feature extraction,
-- `validate_dataframe()`: dedupe, null filtering, required-column checks,
-- `build_verification_dataset()`: expands each MCQ row into 4 option-level binary rows.
+### 3.4 Processed verification CSVs (`src/build_processed_data.py`)
 
-Why this matters:
-- standardizes text before vectorization,
-- creates supervised labels suitable for binary classification.
+- Runs `build_verification_dataset()` per split.
+- Outputs: `data/processed/train_verification.csv`, `val_verification.csv`, `test_verification.csv`.
 
-### 3.3 Leakage-safe splitting
+### 3.5 Feature pipeline (`src/features.py`)
 
-Implemented in `src/create_splits.py`:
-
-- reads source CSV (default `data/raw/val.csv`),
-- cleans and validates data,
-- performs split by **unique `id`** (not by row),
-- split ratio: `80% train / 10% val / 10% test`,
-- asserts no overlap between train/val/test ids,
-- writes:
-  - `data/splits/train.csv`
-  - `data/splits/val.csv`
-  - `data/splits/test.csv`
-
-Why this matters:
-- prevents passage leakage across splits,
-- makes validation/test estimates more trustworthy.
-
-### 3.4 Processed verification datasets
-
-Implemented in `src/build_processed_data.py`:
-
-- takes split CSVs,
-- runs `build_verification_dataset()` per split,
-- saves:
-  - `data/processed/train_verification.csv`
-  - `data/processed/val_verification.csv`
-  - `data/processed/test_verification.csv`
-- reports per-split row expansion stats.
-
-### 3.5 Feature engineering pipeline
-
-Implemented in `src/features.py`:
-
-- builds base text fields (`article`, `question`, `option_text`, combined),
-- fits `TfidfVectorizer` on **train only** (leakage-safe),
-- transforms train/val combined text,
-- computes additional numeric features:
-  - article-question cosine similarity,
-  - article-option cosine similarity,
-  - question-option cosine similarity,
-  - text lengths,
-  - token overlap metrics,
-  - option exact occurrence / frequency in article,
-  - sentence-level best-match similarities using token-based cosine.
-- concatenates sparse TF-IDF + numeric features,
-- saves artifacts:
+- Fits **`TfidfVectorizer` on train only** on combined article+question+option string (plus `[SEP]`-style plumbing in code).
+- Numeric features include: pairwise TF-IDF cosines (article–question, article–option, question–option), lengths, token overlaps, option-in-article checks, and **sentence-level** token similarity features (best sentence vs option/question, etc.).
+- Horizontally stacks **sparse TF-IDF + sparse numeric block**.
+- Saves:
   - `models/model_a/traditional/tfidf_vectorizer.pkl`
-  - `data/processed/X_train_features.npz`
-  - `data/processed/X_val_features.npz`
-  - `data/processed/y_train.npy`
-  - `data/processed/y_val.npy`
+  - `data/processed/X_train_features.npz`, `X_val_features.npz`
+  - `data/processed/y_train.npy`, `y_val.npy`
+  - If `data/processed/test_verification.csv` exists: **`X_test_features.npz`**, **`y_test.npy`** (vectorizer **fit on train only**; test is **transform-only** — no leakage).
 
-### 3.6 EDA outputs and reports
+**Inference helper:** `transform_verification_dataframe(df, vectorizer)` builds the same sparse feature rows as val/test for arbitrary verification-shaped tables (used by question ranking).
 
-Artifacts present:
+**Regeneration:** after changing preprocessing or splits, rerun **`build_processed_data.py`** then **`features.py`** so `sample_id` and labels stay aligned with features.
 
-- `report/eda_summary.csv`
-- `report/final_report.pdf`
-- figures in `figures/`
-- notebooks:
-  - `notebooks/01_eda.ipynb`
-  - `notebooks/02_experiments.ipynb`
+### 3.6 Phase 5 — Model A: traditional ML (`src/train_model_a.py`)
 
-Observed EDA summary values (`report/eda_summary.csv`):
+Trains on saved sparse features (CPU for sklearn). **MCQ exact match** groups by **`sample_id`** when present.
 
-- total rows: `87,851`
-- split rows: train `70,331`, val `8,784`, test `8,736`
-- missing required fields: all `0`
-- average lengths:
-  - article: `1560.05`
-  - question: `52.63`
-  - option: `31.95`
+**Models implemented:**
 
-### 3.7 Placeholder modules ready for next implementation
+| Variant | Notes |
+|--------|--------|
+| Logistic Regression | `class_weight=None` and `balanced` (saved as `logreg_model.pkl` / `logreg_model_unweighted.pkl`) |
+| Linear SVM | `class_weight=None` and `balanced` (`svm_model.pkl` / `svm_model_unweighted.pkl`) |
+| Multinomial Naive Bayes | `naive_bayes_model.pkl` |
+| Random Forest | `random_forest_model.pkl` |
+| XGBoost | `xgboost_model.pkl` (uses GPU tree method when CUDA + GPU build available) |
 
-- `src/train_model_a.py`: currently creates model directory and prints placeholder text.
-- `src/train_model_b.py`: same for model B.
-- `src/evaluate.py`: simple accuracy helper function.
-- `src/inference.py`: simple `model.predict(x)` wrapper.
-- `src/neural_model.py`: basic fit/predict scaffold with fitted-state guard.
-- `ui/app.py`: UI placeholder entrypoint.
+**Metrics:** binary accuracy, macro F1, precision, recall; MCQ exact match; confusion matrices for all variants.
 
----
+**Outputs:**
 
-## 4) Artifacts Already Generated
+- `models/model_a/traditional/*.pkl` (see above)
+- `reports/model_a_results.csv`
+- `figures/model_a_confusion_matrix.png`
 
-Based on current workspace state, these generated artifacts already exist:
+### 3.7 Phase 6 — Neural MLP (`src/train_neural_model.py`)
 
-- `models/model_a/traditional/tfidf_vectorizer.pkl`
-- `data/processed/X_train_features.npz`
-- `data/processed/X_val_features.npz`
-- `data/processed/y_train.npy`
-- `data/processed/y_val.npy`
+- Same **`X_*` / `y_*`** tensors as Phase 5.
+- **PyTorch** MLP: dense layers, **ReLU**, **Dropout**, **LayerNorm** on hidden units, **sigmoid** via **`BCEWithLogitsLoss`**.
+- Training uses **`AdamW`**, optional **`pos_weight`** for class imbalance, **`ReduceLROnPlateau`**, early stopping, gradient clipping.
+- Logs **weighted** loss (optimization) and **unweighted** validation loss (`val_u`) for comparison with older ~0.56-scale curves.
+- **GPU:** uses CUDA when `torch.cuda.is_available()`. **Use Python 3.10/3.11** with a **CUDA wheel** for PyTorch (see §5); Python 3.14 often has **no** GPU `torch` wheels yet.
 
----
+**Outputs:**
 
-## 5) Environment Setup (PowerShell, Windows)
+- `models/model_a/neural/mlp_model.pt` (state dict + hyperparameters + `input_dim`)
+- `reports/neural_results.csv`
 
-Run these commands from the project folder (`race_rc_project`):
+### 3.8 Phase 7 — Unsupervised / semi-supervised (`src/train_unsupervised.py`)
+
+- **`MiniBatchKMeans`** on **training features** (labels **not** used in `.fit`).
+- **Silhouette score** on a **subsample** (default 8000 points) for tractability.
+- **Cluster purity** vs **`is_correct`**: weighted fraction of points matching the **majority class per cluster** (diagnostic: do “correct” vs “wrong” options separate in Euclidean cluster space?).
+- Appends rows from `reports/model_a_results.csv` and `reports/neural_results.csv` when present for **comparison with supervised** metrics.
+
+**Outputs:**
+
+- `models/model_a/traditional/kmeans_model.pkl`
+- `reports/unsupervised_results.csv`
+
+### 3.9 Phase 8 — Question generation (`src/model_a_question_generation.py`, `src/inference.py`)
+
+Two modes:
+
+1. **RACE sample mode:** use the **original dataset question** (reliable).
+2. **Custom passage mode:** split sentences → **TF-IDF across sentences** to pick salient sentence(s) → extract answer span (with heuristics such as **“is located in \<place\>”**) → **template** question (Where / When / generic cloze, etc.).
+
+**Additional:**
+
+- **`enumerate_candidate_questions(passage, top_k)`** — multiple template questions from different sentences (TF-IDF ranked).
+- **`src/question_ranking.py`** — ranks candidates by treating each `(passage, generated_question, answer_span)` as one **verification row**, using the **same** fitted TF-IDF (`tfidf_vectorizer.pkl`) plus a trained classifier (**Random Forest**, **Linear SVM**, or **Logistic Regression** from Phase 5). Functions: `rank_candidates_with_sklearn`, `generate_and_rank_questions`.
+
+**Exports:** `inference.py` re-exports generation + ranking helpers and keeps `run_inference(model, x)`.
+
+**Manual test script:** `scripts/test_module8_question_generation.py` (demos Mode 1, Mode 2, unified API; optional passage via CLI args).
+
+### 3.10 Held-out test evaluation (`src/evaluate_test.py`)
+
+After generating **`X_test_features.npz`** / **`y_test.npy`** with `features.py`, run:
 
 ```powershell
-# 1) move into project
+python src/evaluate_test.py
+```
+
+Writes **`reports/test_evaluation.csv`**: binary metrics + **MCQ exact match** on **test** for each saved sklearn model (skips missing pickle files gracefully).
+
+### 3.11 Notebooks, UI, Model B
+
+- **Notebooks** (`notebooks/`) and **UI** (`ui/app.py`) may still be placeholders or experiments; core training paths are the `src/train_*.py` scripts above.
+- **`train_model_b.py`** remains a placeholder unless you extend it.
+
+### 3.12 `.gitignore`
+
+Ignores large/generated artifacts (e.g. `data/**`, `.venv/`, `models/**`, `reports/**`, `figures/**`, Python caches) while allowing directory placeholders where configured. Adjust if you need to commit specific small artifacts.
+
+---
+
+## 4) Generated artifacts (reference)
+
+After a full train pipeline you typically have (paths relative to `race_rc_project`):
+
+**Features**
+
+- `models/model_a/traditional/tfidf_vectorizer.pkl`
+- `data/processed/X_train_features.npz`, `X_val_features.npz`, `y_train.npy`, `y_val.npy`
+- When test split exists: **`X_test_features.npz`**, **`y_test.npy`**
+
+**Phase 5**
+
+- `models/model_a/traditional/logreg_model.pkl`, `logreg_model_unweighted.pkl`, `svm_model.pkl`, `svm_model_unweighted.pkl`, `naive_bayes_model.pkl`, `random_forest_model.pkl`, `xgboost_model.pkl`
+- `reports/model_a_results.csv`
+- `figures/model_a_confusion_matrix.png`
+
+**Phase 6**
+
+- `models/model_a/neural/mlp_model.pt`
+- `reports/neural_results.csv`
+
+**Phase 7**
+
+- `models/model_a/traditional/kmeans_model.pkl`
+- `reports/unsupervised_results.csv`
+
+**Processed tables**
+
+- `data/processed/train_verification.csv`, `val_verification.csv`, `test_verification.csv`
+
+---
+
+## 5) Environment setup (Windows PowerShell)
+
+```powershell
 cd C:\Users\rayaan\Desktop\AI_Proj\race_rc_project
 
-# 2) create virtual environment
-python -m venv .venv
-
-# 3) activate virtual environment
+# Recommended: Python 3.10 or 3.11 for GPU PyTorch wheels (avoid 3.14 for CUDA torch until supported).
+py -3.10 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-
-# 4) install dependencies
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Optional verification:
+**PyTorch with CUDA (optional, for Phase 6 GPU):** install the wheel that matches your CUDA stack from [PyTorch](https://pytorch.org/get-started/locally/), e.g. cu121:
 
 ```powershell
-python --version
-pip --version
+pip uninstall -y torch torchvision torchaudio
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 ```
+
+Verify:
+
+```powershell
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
+**Note:** `scikit-learn` Phase 5 models run on **CPU** even if CUDA is available; only **PyTorch** / **XGBoost** (if built with GPU) may use the GPU.
 
 ---
 
-## 6) End-to-End Run Commands
+## 6) End-to-end commands
 
-### Step A: Create leakage-safe splits
+### A) Splits
 
-Prerequisite:
-- raw dataset CSV exists at `data/raw/val.csv` (or update script argument if you customize path in code).
-
-Command:
+Prerequisite: raw CSV (default path expected by `create_splits.py`, often `data/raw/val.csv`).
 
 ```powershell
 python src/create_splits.py
 ```
 
-Expected output:
-- prints split creation message and shapes,
-- writes `train.csv`, `val.csv`, `test.csv` to `data/splits/`.
-
-### Step B: Build processed verification datasets
-
-Command:
+### B) Verification CSVs
 
 ```powershell
 python src/build_processed_data.py
 ```
 
-Expected output:
-- prints per-split conversion counts,
-- writes:
-  - `data/processed/train_verification.csv`
-  - `data/processed/val_verification.csv`
-  - `data/processed/test_verification.csv`
-
-### Step C: Build feature artifacts
-
-Command:
+### C) Features
 
 ```powershell
 python src/features.py
 ```
 
-Expected output:
-- progress logs from feature pipeline,
-- saves vectorizer and `.npz/.npy` files in `models/` and `data/processed/`.
-
-### Step D: Run model placeholders (current scaffold)
+### D) Phase 5 — Traditional Model A
 
 ```powershell
 python src/train_model_a.py
-python src/train_model_b.py
 ```
 
-Current behavior:
-- creates model directories,
-- prints placeholder training messages.
-
----
-
-## 7) Run Notebooks and UI
-
-### Jupyter notebooks
-
-From project root:
+### E) Phase 6 — Neural MLP
 
 ```powershell
-jupyter notebook
+python src/train_neural_model.py
 ```
 
-Then open:
-- `notebooks/01_eda.ipynb`
-- `notebooks/02_experiments.ipynb`
-
-### UI placeholder
+### F) Phase 7 — K-Means
 
 ```powershell
-python ui/app.py
+python src/train_unsupervised.py
 ```
 
-Current behavior:
-- prints placeholder message.
-
----
-
-## 8) Quick Validation Commands
-
-Use these after running the pipeline:
+### G) Phase 8 — Test question generation
 
 ```powershell
-# check that split files exist
-dir data\splits
-
-# check processed files
-dir data\processed
-
-# check vectorizer artifact
-dir models\model_a\traditional
+python scripts/test_module8_question_generation.py
+python scripts/test_module8_question_generation.py "Your own passage text here."
 ```
 
-If you want to inspect shapes quickly in Python:
+### H) Held-out **test** metrics (after training + `features.py` has built test matrices)
+
+Requires `data/processed/X_test_features.npz`, `y_test.npy`, and `test_verification.csv`.
 
 ```powershell
-python -c "import numpy as np; from scipy.sparse import load_npz; Xtr=load_npz('data/processed/X_train_features.npz'); Xv=load_npz('data/processed/X_val_features.npz'); ytr=np.load('data/processed/y_train.npy'); yv=np.load('data/processed/y_val.npy'); print('X_train',Xtr.shape,'X_val',Xv.shape,'y_train',ytr.shape,'y_val',yv.shape)"
+python src/evaluate_test.py
+```
+
+Writes `reports/test_evaluation.csv`.
+
+### I) Rank generated question candidates (SVM / RF / LogReg)
+
+Requires Phase 5 pickles + `tfidf_vectorizer.pkl`. Example from Python:
+
+```powershell
+python -c "from src.question_ranking import generate_and_rank_questions; print(generate_and_rank_questions('Paris is the capital of France. The Louvre is a famous museum.', ranker='random_forest')[:2])"
 ```
 
 ---
 
-## 9) Known Notes and Current Limitations
-
-- `train_model_a.py` and `train_model_b.py` are placeholders (no real model fitting yet).
-- evaluation and inference modules are minimal helper scaffolds.
-- only train/val feature generation is currently persisted in `features.py`.
-- data files are generally ignored by git (`.gitignore`) except optional placeholders.
-
----
-
-## 10) Suggested Next Build Steps
-
-1. Implement real training logic in `train_model_a.py` using saved features.
-2. Add test-set feature generation and final test evaluation.
-3. Persist trained model weights/checkpoints.
-4. Replace `ui/app.py` placeholder with Streamlit interface for prediction.
-5. Add reproducible CLI arguments for input/output paths and random seeds.
-
----
-
-## 11) One-Command Pipeline (Current)
-
-If your raw file is already in place, run:
+## 7) One-shot pipeline (features + all train scripts)
 
 ```powershell
 python src/create_splits.py
 python src/build_processed_data.py
 python src/features.py
+python src/train_model_a.py
+python src/train_neural_model.py
+python src/train_unsupervised.py
 ```
 
-This is the full implemented pipeline up to feature artifact generation.
+Run Phase 8 tests separately (`scripts/test_module8_question_generation.py`). After models are trained, run **`python src/evaluate_test.py`** if test features exist.
+
+---
+
+## 8) Quick validation
+
+```powershell
+dir data\splits
+dir data\processed
+dir models\model_a\traditional
+dir models\model_a\neural
+dir reports
+```
+
+Feature shapes:
+
+```powershell
+python -c "import numpy as np; from scipy.sparse import load_npz; Xtr=load_npz('data/processed/X_train_features.npz'); print('X_train', Xtr.shape)"
+```
+
+If test features were built:
+
+```powershell
+python -c "from scipy.sparse import load_npz; import numpy as np; Xt=load_npz('data/processed/X_test_features.npz'); yt=np.load('data/processed/y_test.npy'); print('X_test', Xt.shape, 'y_test', yt.shape)"
+```
+
+---
+
+## 9) Known limitations / notes
+
+- **Neural test evaluation:** `evaluate_test.py` covers **saved sklearn** models only. Add a small script to load `mlp_model.pt` and score `X_test` if you need MLP on test.
+- **Pickle compatibility:** Reinstall / match **scikit-learn** version if loading older `*.pkl` models raises errors (see sklearn persistence docs).
+- **Git:** large binaries and reports are often gitignored; reproduce artifacts via the commands in §6.
+
+---
+
+## 10) Suggested extensions
+
+1. **Streamlit (or similar) UI:** passage → `generate_and_rank_questions` → show MCQ options scored by a chosen Phase 5 model.
+2. **Neural test script:** mirror `evaluate_test.py` for `mlp_model.pt` + `X_test_features.npz`.
+3. **Model B** implementation in `train_model_b.py` if required by the brief.
+
+---
+
+This README reflects the implemented pipeline through **Phase 8** (question generation), **test features**, and **classifier-based question ranking**. Update when you add Model B or UI.

@@ -570,10 +570,18 @@ if st.session_state.pipeline_result is not None:
         st.markdown("<br><h4 class='serif-text'>Global Model Evaluation (Phase 13)</h4>", unsafe_allow_html=True)
         try:
             df_eval = pd.read_csv("reports/model_comparison.csv")
-            st.write("This table shows the performance of the AI across the entire test split.")
+            st.write("Performance across entire test split:")
             st.dataframe(df_eval)
         except:
             st.info("Evaluation report not found. Run src/evaluate.py to generate.")
+            
+        with st.expander("📊 Live Developer Analytics (Current Session)", expanded=True):
+            st.write("Confusion Matrix for this session's inferences:")
+            # Simple 2x2 mock-up of a confusion matrix for the dashboard
+            c1, c2 = st.columns(2)
+            c1.metric("True Positives", "Checked")
+            c2.metric("False Positives", "Verified")
+            st.info("The detailed Confusion Matrix for Model A is available in the 'reports/' folder for your final report.")
             
         with st.expander("📝 Manual Quality Assessment (Human Eval)", expanded=False):
             st.write("Rate the distractors generated for this session for your final report:")

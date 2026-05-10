@@ -40,7 +40,7 @@ class Pipeline:
         question: Optional[str] = None, 
         options: Optional[Dict[str, str]] = None,
         correct_answer: Optional[str] = None,
-        model_a_name: str = "random_forest"
+        model_a_name: str = "logistic_regression"
     ) -> Dict[str, Any]:
         """
         Unified inference connecting article to question, options, predictions, and hints.
@@ -138,7 +138,7 @@ def run_pipeline(
     question: Optional[str] = None, 
     options: Optional[Dict[str, str]] = None,
     correct_answer: Optional[str] = None,
-    model_a_name: str = "random_forest"
+    model_a_name: str = "logistic_regression"
 ) -> Dict[str, Any]:
     global _GLOBAL_PIPELINE
     if _GLOBAL_PIPELINE is None:

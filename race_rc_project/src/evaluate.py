@@ -43,7 +43,7 @@ def run_evaluation(num_samples=50):
         }
         
         start = time.perf_counter()
-        res = pipe.run_pipeline(article, question, options, correct_answer=ground_truth)
+        res = pipe.run_pipeline(article, question, options, correct_answer=ground_truth, model_a_name="logistic_regression")
         latencies.append(time.perf_counter() - start)
         
         prediction = res['predicted_answer']
@@ -69,17 +69,83 @@ def run_evaluation(num_samples=50):
     print(f"MCQ Exact Match Accuracy: {acc:.4f}")
     print(f"Average Inference Latency: {np.mean(latencies):.4f}s")
     
-    # Model B Distractor Metrics (Plausibility)
-    # We can measure how often Model A is "tricked" or how high the confidence is for distractors
-    avg_max_conf = eval_df['max_confidence'].mean()
-    print("\n--- Model B (Distractor Generation) Results ---")
-    print(f"Mean Max Confidence Score: {avg_max_conf:.4f} (Higher indicates more plausible options)")
-    
-    # Save Model Comparison
+    # ------------------------------------------------------------------------
+    # MODEL B: DISTRACTOR EVALUATION
+    # ------------------------------------------------------------------------
+    print("\nEvaluating Model B (Distractors & Hints)...")
+    dist_results = []
+    hint_precisions = []
+
+    for idx, row in df.iterrows():
+        article = row['article']
+        question = row['question']
+        ground_truth_letter = row['answer']
+        options = {"A": row['A'], "B": row['B'], "C": row['C'], "D": row['D']}
+        correct_text = options[ground_truth_letter]
+        reference_distractors = [v for k, v in options.items() if k != ground_truth_letter]
+        
+        # Generate distractors using Model B
+        generated_res = pipe.distractor_gen.generate_distractors_custom(article, question, correct_text)
+        
+        # Recall: How many reference distractors were recovered (similiarity > 0.8)
+        recovered = 0
+        for ref in reference_distractors:
+            for gen in generated_res:
+                # Simple overlap similarity
+                sim = len(set(ref.lower().split()) & set(gen.lower().split())) / max(len(set(ref.split())), 1)
+                if sim > 0.7:
+                    recovered += 1
+                    break
+        
+        recall = recovered / 3
+        
+        # ------------------------------------------------------------------------
+        # MODEL B: HINT EVALUATION
+        # ------------------------------------------------------------------------
+        hints = pipe.hint_gen.generate_hints(article, question, correct_text)
+        
+        # Find gold sentence (sentence containing correct_text)
+        sentences = [s.strip() for s in article.split('.') if s.strip()]
+        gold_sentence = ""
+        for s in sentences:
+            if correct_text.lower() in s.lower():
+                gold_sentence = s
+                break
+        
+        # Hint Precision: Did any hint (especially Hint 2 or 3) contain words from the gold sentence?
+        hit = 0
+        if gold_sentence:
+            gold_words = set(gold_sentence.lower().split())
+            for h in hints:
+                hint_words = set(h.lower().split())
+                if len(gold_words & hint_words) / len(gold_words) > 0.3:
+                    hit = 1
+                    break
+        hint_precisions.append(hit)
+        
+        dist_results.append({
+            "recall": recall,
+            "hints_hit": hit
+        })
+
+    dist_df = pd.DataFrame(dist_results)
+    avg_recall = dist_df['recall'].mean()
+    avg_hint_prec = np.mean(hint_precisions)
+
+    print("\n--- Model B (Generation) Results ---")
+    print(f"Distractor Recall (Overlap > 0.7): {avg_recall:.4f}")
+    print(f"Hint Extraction Precision: {avg_hint_prec:.4f}")
+
+    # Update Comparison
     comparison = pd.DataFrame([{
-        "Metric": "MCQ Exact Match",
-        "Model A (Traditional)": acc,
-        "Model B (Plausibility)": avg_max_conf
+        "Metric": "MCQ Exact Match (Model A)",
+        "Value": acc
+    }, {
+        "Metric": "Distractor Recall (Model B)",
+        "Value": avg_recall
+    }, {
+        "Metric": "Hint Precision",
+        "Value": avg_hint_prec
     }])
     
     report_dir = Path("reports")
@@ -87,9 +153,11 @@ def run_evaluation(num_samples=50):
     
     comparison.to_csv(report_dir / "model_comparison.csv", index=False)
     eval_df.to_csv(report_dir / "final_test_results.csv", index=False)
+    dist_df.to_csv(report_dir / "model_b_distractor_results.csv", index=False)
     
-    print(f"\nReports saved to {report_dir}")
+    print(f"\nAll reports saved to {report_dir}")
     print("Evaluation Complete!")
 
 if __name__ == "__main__":
-    run_evaluation(num_samples=30)
+    run_evaluation(num_samples=20)
+

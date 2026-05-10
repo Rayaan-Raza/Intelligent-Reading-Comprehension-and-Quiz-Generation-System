@@ -374,6 +374,16 @@ python -c "from scipy.sparse import load_npz; import numpy as np; Xt=load_npz('d
 2. **Neural calibration:** tune thresholding and calibration for MLP probability outputs.
 3. **Model B** implementation in `train_model_b.py` if required by the brief.
 
+## 11) Demo Guide (Phase 13 Presentation)
+
+Use these commands to demonstrate the system's capabilities during the presentation:
+
+- **Launch Web UI**: `streamlit run ui/app.py`
+- **Run Full Evaluation**: `python src/evaluate.py`
+- **Question Generation Demo**: `python scripts/test_module8_question_generation.py`
+
+*Note: Evaluation results are saved in `reports/model_comparison.csv` and displayed in the UI's Session Summary.*
+
 ---
 
-This README reflects the implemented pipeline through **Phase 8** (question generation), **test features**, and **classifier-based question ranking**. Update when you add Model B or UI.
+This README reflects the full pipeline through **Phase 13**, including integrated Model A/B evaluation and the editorial-style Streamlit UI.

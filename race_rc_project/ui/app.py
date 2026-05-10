@@ -356,12 +356,16 @@ def load_random_sample():
         # Construct options dict from A, B, C, D columns if they exist
         if 'A' in sample and 'B' in sample:
             opts = {"A": sample['A'], "B": sample['B'], "C": sample['C'], "D": sample['D']}
+            ans = sample['answer']
+            ref_distractors = [v for k, v in opts.items() if k != ans]
         else:
-            opts = sample['options']
-        return sample['article'], sample['question'], opts, sample['answer']
+            opts = sample['options'] if isinstance(sample['options'], dict) else {}
+            ans = sample['answer']
+            ref_distractors = []
+        return sample['article'], sample['question'], opts, ans, ref_distractors
     
     # Fallback
-    return "The Eiffel Tower is a wrought-iron lattice tower on the Champ de Mars in Paris, France.", "Where is the Eiffel Tower?", {"A": "London", "B": "Paris", "C": "Berlin", "D": "Madrid"}, "B"
+    return "The Eiffel Tower is a wrought-iron lattice tower on the Champ de Mars in Paris, France.", "Where is the Eiffel Tower?", {"A": "London", "B": "Paris", "C": "Berlin", "D": "Madrid"}, "B", ["London", "Berlin", "Madrid"]
 
 # ------------------------------------------------------------------------
 # TAB 0: PREPARATION
@@ -377,9 +381,10 @@ with tab_setup:
         st.markdown("<h4 class='serif-text'>Quick Practice</h4>", unsafe_allow_html=True)
         st.write("Load a random passage from the RACE dataset.")
         if st.button("Fetch Random Passage", key="btn_random"):
-            article, question, options_str, correct_ans = load_random_sample()
+            article, question, options_str, correct_ans, ref_dists = load_random_sample()
             st.session_state.input_article = article
             st.session_state.input_question = question
+            st.session_state.ref_distractors = ref_dists
             try:
                 import ast
                 st.session_state.input_options = ast.literal_eval(options_str) if isinstance(options_str, str) else options_str
@@ -490,7 +495,8 @@ if st.session_state.pipeline_result is not None:
                     st.dataframe(df_scores)
                 
                 if st.button("Try Another Question"):
-                    article, question, opts, correct_ans = load_random_sample()
+                    article, question, opts, correct_ans, ref_dists = load_random_sample()
+                    st.session_state.ref_distractors = ref_dists
                     with st.spinner("Fetching new question..."):
                         st.session_state.pipeline_result = run_pipeline(
                             article=article,
@@ -562,10 +568,29 @@ if st.session_state.pipeline_result is not None:
             
         st.markdown("<br>", unsafe_allow_html=True)
         c3, c4 = st.columns(2)
+        
+        # Calculate Conceptual Recall for current session if available
+        session_recall = "N/A"
+        if "ref_distractors" in st.session_state and st.session_state.ref_distractors:
+            ref_dists = st.session_state.ref_distractors
+            # Get generated distractors from options (excluding actual answer)
+            actual_ans = res.get("actual_answer")
+            gen_dists = [v for k, v in res["options"].items() if k != actual_ans]
+            
+            recovered = 0
+            for ref in ref_dists:
+                ref_words = set(ref.lower().split())
+                for gen in gen_dists:
+                    gen_words = set(str(gen).lower().split())
+                    if any(w in ref_words for w in gen_words if len(w) > 2):
+                        recovered += 1
+                        break
+            session_recall = f"{recovered/3:.1%}"
+
         with c3:
             st.markdown(f"<div class='metric-card'><div class='metric-label'>Prediction Confidence</div><div class='metric-value'>{max(res['confidence_scores'].values()):.1%}</div></div>", unsafe_allow_html=True)
         with c4:
-            st.markdown(f"<div class='metric-card'><div class='metric-label'>Pipeline Status</div><div class='metric-value'>Healthy</div></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-card'><div class='metric-label'>Conceptual Recall</div><div class='metric-value'>{session_recall}</div></div>", unsafe_allow_html=True)
             
         st.markdown("<br><h4 class='serif-text'>Global Model Evaluation (Phase 13)</h4>", unsafe_allow_html=True)
         try:

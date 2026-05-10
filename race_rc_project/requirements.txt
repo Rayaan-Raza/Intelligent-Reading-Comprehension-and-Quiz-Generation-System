@@ -11,3 +11,4 @@ tqdm
 torch
 sentence-transformers
 xgboost
+rouge-score

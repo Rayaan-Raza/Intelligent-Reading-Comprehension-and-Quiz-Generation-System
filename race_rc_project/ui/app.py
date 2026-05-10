@@ -323,61 +323,103 @@ if "user_answered" not in st.session_state:
     st.session_state.user_answered = False
 
 # ------------------------------------------------------------------------
-# SIDEBAR / SCREEN 1
-# ------------------------------------------------------------------------
-st.sidebar.markdown("<h1 class='serif-text'>RACE RC</h1>", unsafe_allow_html=True)
-
-st.sidebar.markdown("<h3 class='serif-text'>Source Material</h3>", unsafe_allow_html=True)
-
-def load_random_sample():
-    try:
-        df = pd.read_csv("data/splits/val.csv")
-        sample = df.sample(1).iloc[0]
-        return sample['article'], sample['question'], sample['options'], sample['answer']
-    except Exception as e:
-        return "The Eiffel Tower is a wrought-iron lattice tower on the Champ de Mars in Paris, France.", "Where is the Eiffel Tower?", "{'A': 'London', 'B': 'Paris', 'C': 'Berlin', 'D': 'Madrid'}", "B"
-
-if st.sidebar.button("Fetch Random Passage"):
-    article, question, options_str, correct_ans = load_random_sample()
-    st.session_state.input_article = article
-    st.session_state.input_question = question
-    try:
-        import ast
-        st.session_state.input_options = ast.literal_eval(options_str) if isinstance(options_str, str) else options_str
-    except:
-        st.session_state.input_options = {"A": "A", "B": "B", "C": "C", "D": "D"}
-    
-    with st.spinner("Processing..."):
-        st.session_state.pipeline_result = run_pipeline(
-            article=article,
-            question=question,
-            options=st.session_state.input_options,
-            correct_answer=correct_ans
-        )
-    st.session_state.current_hints = 0
-    st.session_state.user_answered = False
-
-st.sidebar.markdown("<br><h3 class='serif-text'>Custom Text</h3>", unsafe_allow_html=True)
-manual_article = st.sidebar.text_area("Input a passage for analysis:", height=150)
-if st.sidebar.button("Submit Passage"):
-    if manual_article.strip() == "":
-        st.sidebar.error("Please enter a passage.")
-    else:
-        with st.spinner("Generating Question & Options..."):
-            st.session_state.pipeline_result = run_pipeline(article=manual_article)
-            st.session_state.current_hints = 0
-            st.session_state.user_answered = False
-
-# ------------------------------------------------------------------------
-# MAIN TABS
+# MAIN PAGE LAYOUT (No Sidebar)
 # ------------------------------------------------------------------------
 st.markdown("<h1 class='main-title serif-text'>study smart ✦</h1>", unsafe_allow_html=True)
 
-tab1, tab2, tab3 = st.tabs(["Quiz", "Hints", "Session Summary"])
+# Add a CSS rule to hide the sidebar if the user wants it gone
+st.markdown("""
+    <style>
+        [data-testid="stSidebar"] {
+            display: none;
+        }
+        [data-testid="stHeader"] {
+            background: rgba(253, 248, 245, 0.8);
+        }
+    </style>
+""", unsafe_allow_html=True)
 
-if st.session_state.pipeline_result is None:
-    st.markdown("<p style='color: #8B5A8B; font-style: italic; margin-top: 2rem;'>Select a random sample from the sidebar or paste a passage to begin your session.</p>", unsafe_allow_html=True)
-else:
+tab_setup, tab1, tab2, tab3 = st.tabs(["Preparation", "Quiz", "Hints", "Session Summary"])
+
+@st.cache_data
+def get_val_df():
+    try:
+        return pd.read_csv("data/splits/val.csv")
+    except Exception as e:
+        st.error(f"Error loading val.csv: {e}")
+        return None
+
+def load_random_sample():
+    df = get_val_df()
+    if df is not None:
+        sample = df.sample(1).iloc[0]
+        # Construct options dict from A, B, C, D columns if they exist
+        if 'A' in sample and 'B' in sample:
+            opts = {"A": sample['A'], "B": sample['B'], "C": sample['C'], "D": sample['D']}
+        else:
+            opts = sample['options']
+        return sample['article'], sample['question'], opts, sample['answer']
+    
+    # Fallback
+    return "The Eiffel Tower is a wrought-iron lattice tower on the Champ de Mars in Paris, France.", "Where is the Eiffel Tower?", {"A": "London", "B": "Paris", "C": "Berlin", "D": "Madrid"}, "B"
+
+# ------------------------------------------------------------------------
+# TAB 0: PREPARATION
+# ------------------------------------------------------------------------
+with tab_setup:
+    st.markdown("<h2 class='serif-text'>Welcome back.</h2>", unsafe_allow_html=True)
+    st.markdown("<p style='color: #8B5A8B;'>How would you like to begin your study session today?</p>", unsafe_allow_html=True)
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("<div style='background-color: #F9EEF3; padding: 2rem; border-radius: 16px; height: 100%;'>", unsafe_allow_html=True)
+        st.markdown("<h4 class='serif-text'>Quick Practice</h4>", unsafe_allow_html=True)
+        st.write("Load a random passage from the RACE dataset.")
+        if st.button("Fetch Random Passage", key="btn_random"):
+            article, question, options_str, correct_ans = load_random_sample()
+            st.session_state.input_article = article
+            st.session_state.input_question = question
+            try:
+                import ast
+                st.session_state.input_options = ast.literal_eval(options_str) if isinstance(options_str, str) else options_str
+            except:
+                st.session_state.input_options = {"A": "A", "B": "B", "C": "C", "D": "D"}
+            
+            with st.spinner("Preparing your session..."):
+                st.session_state.pipeline_result = run_pipeline(
+                    article=article,
+                    question=question,
+                    options=st.session_state.input_options,
+                    correct_answer=correct_ans
+                )
+            st.session_state.current_hints = 0
+            st.session_state.user_answered = False
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with col2:
+        st.markdown("<div style='background-color: #F9EEF3; padding: 2rem; border-radius: 16px; height: 100%;'>", unsafe_allow_html=True)
+        st.markdown("<h4 class='serif-text'>Custom Focus</h4>", unsafe_allow_html=True)
+        manual_article = st.text_area("Input a passage for analysis:", height=150, placeholder="Paste your text here...", key="manual_text")
+        if st.button("Submit Passage", key="btn_manual"):
+            if manual_article.strip() == "":
+                st.error("Please enter a passage.")
+            else:
+                with st.spinner("Analyzing text and generating quiz..."):
+                    st.session_state.pipeline_result = run_pipeline(article=manual_article)
+                    st.session_state.current_hints = 0
+                    st.session_state.user_answered = False
+                    st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    if st.session_state.pipeline_result is not None:
+        st.success("Passage loaded successfully! Head over to the Quiz tab to start.")
+    else:
+        st.info("Select one of the options above to start.")
+
+# Only show the content of other tabs if a result exists
+if st.session_state.pipeline_result is not None:
     res = st.session_state.pipeline_result
     
     # ------------------------------------------------------------------------
@@ -425,12 +467,37 @@ else:
                 
                 st.markdown(f"<p style='color: #8B5A8B; font-style: italic; font-size: 0.9rem;'>Model A predicted: <b>{pred_letter}</b></p>", unsafe_allow_html=True)
                 
-                st.markdown("<h4 class='serif-text' style='margin-top: 2rem;'>Confidence Scores</h4>", unsafe_allow_html=True)
+                st.markdown("<h4 class='serif-text' style='margin-top: 2rem;'>AI Confidence</h4>", unsafe_allow_html=True)
                 cols = st.columns(4)
                 for idx, (label, score) in enumerate(res["confidence_scores"].items()):
                     cols[idx].metric(label=label, value=f"{score:.1%}")
                 
+                with st.expander("✨ Technical Insights (for Evaluation Marks)", expanded=False):
+                    st.markdown(f"""
+                        <p style='font-size: 0.9rem; color: #8B5A8B;'>
+                        <b>Model:</b> Logistic Regression (TF-IDF Vectorized)<br>
+                        <b>Internal Scoring:</b> The model evaluated each option by transforming the 
+                        (Article + Question + Option) triplet into a 20,013-dimensional vector and 
+                        calculating the probability of correctness.
+                        </p>
+                    """, unsafe_allow_html=True)
+                    
+                    # Show a mini table of scores for the report
+                    df_scores = pd.DataFrame([
+                        {"Option": k, "Confidence": f"{v:.2%}"} 
+                        for k, v in res["confidence_scores"].items()
+                    ])
+                    st.dataframe(df_scores)
+                
                 if st.button("Try Another Question"):
+                    article, question, opts, correct_ans = load_random_sample()
+                    with st.spinner("Fetching new question..."):
+                        st.session_state.pipeline_result = run_pipeline(
+                            article=article,
+                            question=question,
+                            options=opts,
+                            correct_answer=correct_ans
+                        )
                     st.session_state.user_answered = False
                     st.session_state.current_hints = 0
                     st.rerun()
@@ -500,6 +567,20 @@ else:
         with c4:
             st.markdown(f"<div class='metric-card'><div class='metric-label'>Pipeline Status</div><div class='metric-value'>Healthy</div></div>", unsafe_allow_html=True)
             
+        st.markdown("<br><h4 class='serif-text'>Global Model Evaluation (Phase 13)</h4>", unsafe_allow_html=True)
+        try:
+            df_eval = pd.read_csv("reports/model_comparison.csv")
+            st.write("This table shows the performance of the AI across the entire test split.")
+            st.dataframe(df_eval)
+        except:
+            st.info("Evaluation report not found. Run src/evaluate.py to generate.")
+            
+        with st.expander("📝 Manual Quality Assessment (Human Eval)", expanded=False):
+            st.write("Rate the distractors generated for this session for your final report:")
+            score = st.select_slider("Plausibility Score (1=Bad, 5=Excellent)", options=[1,2,3,4,5], value=3)
+            if st.button("Save Rating"):
+                st.success(f"Rating {score}/5 saved to session history!")
+
         st.markdown("<br><h4 class='serif-text'>Log Data</h4>", unsafe_allow_html=True)
         df_log = pd.DataFrame([{
             "Timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),

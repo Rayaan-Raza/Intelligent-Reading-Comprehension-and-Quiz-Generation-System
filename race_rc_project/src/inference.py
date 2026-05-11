@@ -65,6 +65,12 @@ class Pipeline:
             pass
 
         # 2. Generate or accept options
+        # `correct_answer` may currently be either:
+        #   - a letter ("A"/"B"/"C"/"D") when the caller passed RACE-style options
+        #   - the answer text (e.g. "curie") when Model A generated the question
+        #   - None
+        # We normalize it to a letter (`correct_letter`) and a text (`correct_text`)
+        # so downstream code (and the UI) can rely on a consistent shape.
         if not options:
             if not correct_answer:
                 correct_answer = "Default Answer"
@@ -79,10 +85,24 @@ class Pipeline:
                 "C": all_opts[2],
                 "D": all_opts[3]
             }
+            correct_text = correct_answer
+            correct_letter = next(
+                (k for k, v in options.items() if v == correct_answer),
+                None,
+            )
         else:
-            # Try to guess the correct answer for hint generation if not provided
-            # We'll assume the model's prediction is the correct answer for hints later, or leave blank
-            pass
+            if correct_answer in options:
+                correct_letter = correct_answer
+                correct_text = options[correct_answer]
+            elif correct_answer is not None:
+                correct_letter = next(
+                    (k for k, v in options.items() if str(v) == str(correct_answer)),
+                    None,
+                )
+                correct_text = correct_answer
+            else:
+                correct_letter = None
+                correct_text = None
 
         # 3. Score options and pick predicted answer using Model A
         try:
@@ -98,10 +118,8 @@ class Pipeline:
             confidence_scores = {"A": 0.25, "B": 0.25, "C": 0.25, "D": 0.25}
             print(f"Error in prediction: {e}")
 
-        # Try to find the correct answer text for hint generation
-        # If we generated the question, we know correct_answer
-        # If it was passed from RACE, we assume the user knows it, but for hints we use the predicted text
-        hint_answer_text = correct_answer if correct_answer else options.get(predicted_answer, "")
+        # Pick the best text we have to seed hint generation.
+        hint_answer_text = correct_text or options.get(predicted_answer, "")
 
         # 4. Generate hints
         try:
@@ -116,7 +134,8 @@ class Pipeline:
             "article": article,
             "question": question,
             "options": options,
-            "actual_answer": correct_answer,
+            "actual_answer": correct_letter,
+            "actual_answer_text": correct_text,
             "predicted_answer": predicted_answer,
             "confidence_scores": confidence_scores,
             "hints": hints,

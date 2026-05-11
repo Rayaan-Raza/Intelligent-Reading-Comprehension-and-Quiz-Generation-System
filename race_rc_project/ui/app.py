@@ -3,6 +3,7 @@
 import streamlit as st
 import pandas as pd
 import time
+import html
 from pathlib import Path
 import sys
 
@@ -343,10 +344,11 @@ tab_setup, tab1, tab2, tab3 = st.tabs(["Preparation", "Quiz", "Hints", "Session 
 
 @st.cache_data
 def get_val_df():
+    val_path = PROJECT_ROOT / "data" / "splits" / "val.csv"
     try:
-        return pd.read_csv("data/splits/val.csv")
+        return pd.read_csv(val_path)
     except Exception as e:
-        st.error(f"Error loading val.csv: {e}")
+        st.error(f"Error loading val.csv from {val_path}: {e}")
         return None
 
 def load_random_sample():
@@ -419,7 +421,67 @@ with tab_setup:
         st.markdown("</div>", unsafe_allow_html=True)
 
     if st.session_state.pipeline_result is not None:
-        st.success("Passage loaded successfully! Head over to the Quiz tab to start.")
+        res = st.session_state.pipeline_result
+        article_text = str(res.get("article", "") or "").strip()
+        question_text = str(res.get("question", "") or "").strip()
+
+        SNIPPET_LEN = 360
+        if len(article_text) > SNIPPET_LEN:
+            article_snippet = article_text[:SNIPPET_LEN].rstrip() + " …"
+        else:
+            article_snippet = article_text
+
+        char_count = len(article_text)
+        word_count = len(article_text.split())
+        options_count = len(res.get("options") or {})
+
+        safe_question = html.escape(question_text) if question_text else "(no question)"
+        safe_snippet = html.escape(article_snippet) if article_snippet else "(empty article)"
+
+        st.markdown(
+            f"""
+            <div style="
+                background-color: #F9EEF3;
+                border: 1px dotted #E8D5E8;
+                border-radius: 16px;
+                padding: 1.6rem 1.8rem;
+                margin-top: 1.5rem;
+                box-shadow: 0 2px 12px rgba(180, 120, 170, 0.1);
+                animation: gentleFadeIn 0.6s ease forwards;
+            ">
+                <div style="
+                    font-family: 'DM Sans', sans-serif;
+                    text-transform: uppercase;
+                    letter-spacing: 1.5px;
+                    font-size: 0.8rem;
+                    color: #8B5A8B;
+                    margin-bottom: 0.4rem;
+                ">✦ Currently loaded passage</div>
+                <h3 class="serif-text" style="margin-top: 0; margin-bottom: 0.9rem; font-size: 1.6rem; line-height: 1.25;">{safe_question}</h3>
+                <p style="
+                    color: #3D2040;
+                    line-height: 1.6;
+                    font-size: 0.95rem;
+                    margin-bottom: 1.1rem;
+                    font-style: italic;
+                ">{safe_snippet}</p>
+                <div style="
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 0.5rem 1.4rem;
+                    color: #8B5A8B;
+                    font-size: 0.8rem;
+                    letter-spacing: 0.5px;
+                ">
+                    <span>✦ {char_count:,} characters</span>
+                    <span>✦ {word_count:,} words</span>
+                    <span>✦ {options_count} options</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.success("Passage loaded — head to the Quiz tab to start, or fetch another to swap it out.")
     else:
         st.info("Select one of the options above to start.")
 
@@ -459,8 +521,13 @@ if st.session_state.pipeline_result is not None:
             else:
                 # Answer is checked
                 user_letter = st.session_state.user_choice.split(":")[0]
-                actual_letter = res.get("actual_answer", res["predicted_answer"])
                 pred_letter = res["predicted_answer"]
+                actual_letter = res.get("actual_answer")
+                # Safety net: if the pipeline couldn't resolve a valid letter
+                # (e.g. custom passage where the correct text didn't match any option),
+                # fall back to the model's prediction so we never raise KeyError.
+                if actual_letter not in options:
+                    actual_letter = pred_letter
                 
                 if user_letter == actual_letter:
                     st.markdown(f"<div class='correct-pill'>{st.session_state.user_choice}</div>", unsafe_allow_html=True)
@@ -594,7 +661,7 @@ if st.session_state.pipeline_result is not None:
             
         st.markdown("<br><h4 class='serif-text'>Global Model Evaluation (Phase 13)</h4>", unsafe_allow_html=True)
         try:
-            df_eval = pd.read_csv("reports/model_comparison.csv")
+            df_eval = pd.read_csv(PROJECT_ROOT / "reports" / "model_comparison.csv")
             st.write("Performance across entire test split:")
             st.dataframe(df_eval)
         except:
